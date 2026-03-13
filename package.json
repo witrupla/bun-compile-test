@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "source": "dotenvx run -f .env.local -- bun run ./src/mtcute-graph.ts",
-    "bundle:run": "dotenvx run -f .env.local -- bun build ./src/mtcute-graph.ts --outfile ./dist/mtcute-graph.js --target bun && bun run ./dist/mtcute-graph.js",
-    "compile:run": "dotenvx run -f .env.local -- bun run ./build.ts && ./dist/mtcute-graph",
+    "bundle:run": "dotenvx run -f .env.local -- bun build ./src/mtcute-graph.ts --outfile ./dist/mtcute-graph.js --target bun --external @fuman/utils --external @fuman/io && dotenvx run -f .env.local -- bun run ./dist/mtcute-graph.js",
+    "compile:run": "dotenvx run -f .env.local -- bun run ./build.ts && dotenvx run -f .env.local -- ./dist/mtcute-graph",
     "check": "oxfmt && oxlint --type-aware --fix && tsc --noEmit --pretty"
   },
   "dependencies": {
