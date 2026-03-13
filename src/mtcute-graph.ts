@@ -1,15 +1,16 @@
+import { read as ioRead, write as ioWrite } from "@fuman/io"
 import { ip } from "@fuman/net"
 import { typed } from "@fuman/utils"
 import { TelegramClient } from "@mtcute/bun"
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
 
-type SerializedError = {
-  code: string | null
-  message: string | null
-  name: string | null
-  stack: string | null
-}
+import {
+  debugLog,
+  installProcessDebugHandlers,
+  toSerializedError,
+  type SerializedError,
+} from "./debug-runtime"
 
 type ControlResult = {
   firstByte: number
@@ -36,6 +37,12 @@ type GraphResult = {
   connect: GraphStepResult
   destroy: GraphStepResult
   storage: string
+}
+
+type IoProbeResult = {
+  readAccess: GraphStepResult
+  writeAccess: GraphStepResult
+  writeCall: GraphStepResult
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -87,43 +94,6 @@ async function ensureStorageDirectory(storage: string): Promise<void> {
   }
 }
 
-function toSerializedError(error: unknown): SerializedError {
-  if (error instanceof Error) {
-    const code = isRecord(error) ? error.code : null
-
-    return {
-      code: typeof code === "string" ? code : null,
-      message: error.message,
-      name: error.name,
-      stack: error.stack ?? null,
-    }
-  }
-
-  if (isRecord(error)) {
-    const code = error.code
-    const message = error.message
-    const name = error.name
-    const stack = error.stack
-
-    return {
-      code: typeof code === "string" ? code : null,
-      message:
-        typeof message === "string"
-          ? message
-          : (JSON.stringify(error) ?? "Unserializable object error"),
-      name: typeof name === "string" ? name : null,
-      stack: typeof stack === "string" ? stack : null,
-    }
-  }
-
-  return {
-    code: null,
-    message: String(error),
-    name: null,
-    stack: null,
-  }
-}
-
 function runControl(): ControlResult {
   const sampleBytes = new Uint8Array([1, 2, 3, 4])
   const view = typed.toDataView(sampleBytes)
@@ -153,12 +123,91 @@ function toCallValue(result: unknown): string {
   return typeof result
 }
 
+function runIoProbe(): IoProbeResult {
+  debugLog("H6", "src/mtcute-graph.ts:runIoProbe:start", "starting io probe", {
+    entry: process.argv[1] ?? null,
+  })
+
+  let readAccess: GraphStepResult
+
+  try {
+    readAccess = { ok: true, value: typeof ioRead.uint32le }
+    debugLog("H8", "src/mtcute-graph.ts:runIoProbe:readAccess", "read uint32le accessed", {
+      exportType: readAccess.value,
+    })
+  } catch (error: unknown) {
+    const serialized = toSerializedError(error)
+
+    readAccess = { error: serialized, ok: false }
+    debugLog("H8", "src/mtcute-graph.ts:runIoProbe:readAccess", "read uint32le access failed", {
+      code: serialized.code,
+      message: serialized.message,
+      name: serialized.name,
+    })
+  }
+
+  let writeAccess: GraphStepResult
+
+  try {
+    writeAccess = { ok: true, value: typeof ioWrite.uint32le }
+    debugLog("H6", "src/mtcute-graph.ts:runIoProbe:writeAccess", "write uint32le accessed", {
+      exportType: writeAccess.value,
+    })
+  } catch (error: unknown) {
+    const serialized = toSerializedError(error)
+
+    writeAccess = { error: serialized, ok: false }
+    debugLog("H6", "src/mtcute-graph.ts:runIoProbe:writeAccess", "write uint32le access failed", {
+      code: serialized.code,
+      message: serialized.message,
+      name: serialized.name,
+    })
+  }
+
+  let writeCall: GraphStepResult
+
+  if (writeAccess.ok) {
+    try {
+      const bytes = new Uint8Array(4)
+
+      ioWrite.uint32le(bytes, 0x04030201)
+      writeCall = { ok: true, value: bytes.join(",") }
+      debugLog("H7", "src/mtcute-graph.ts:runIoProbe:writeCall", "write uint32le succeeded", {
+        bytes: bytes.join(","),
+      })
+    } catch (error: unknown) {
+      const serialized = toSerializedError(error)
+
+      writeCall = { error: serialized, ok: false }
+      debugLog("H7", "src/mtcute-graph.ts:runIoProbe:writeCall", "write uint32le failed", {
+        code: serialized.code,
+        message: serialized.message,
+        name: serialized.name,
+      })
+    }
+  } else {
+    writeCall = { error: writeAccess.error, ok: false }
+  }
+
+  return { readAccess, writeAccess, writeCall }
+}
+
 async function runGraph(): Promise<GraphResult> {
   const apiHash = readApiHash()
   const apiId = readApiId()
   const storage = readStoragePath()
+  const ioProbe = runIoProbe()
 
   await ensureStorageDirectory(storage)
+
+  debugLog("H2", "src/mtcute-graph.ts:runGraph:setup", "graph setup complete", {
+    readAccessOk: ioProbe.readAccess.ok,
+    writeAccessOk: ioProbe.writeAccess.ok,
+    writeCallOk: ioProbe.writeCall.ok,
+    apiHashLength: apiHash.length,
+    apiId,
+    storage,
+  })
 
   const client = new TelegramClient({
     apiHash,
@@ -171,10 +220,21 @@ async function runGraph(): Promise<GraphResult> {
   let connect: GraphStepResult
 
   try {
+    debugLog("H4", "src/mtcute-graph.ts:runGraph:connect:start", "starting client.connect", {
+      storage,
+    })
     await client.connect()
     connect = { ok: true, value: "connected" }
+    debugLog("H4", "src/mtcute-graph.ts:runGraph:connect:success", "client.connect succeeded", {
+      storage,
+    })
   } catch (error: unknown) {
     connect = { error: toSerializedError(error), ok: false }
+    debugLog("H4", "src/mtcute-graph.ts:runGraph:connect:failure", "client.connect failed", {
+      code: connect.error.code,
+      message: connect.error.message,
+      name: connect.error.name,
+    })
   }
 
   let call: GraphStepResult
@@ -209,6 +269,8 @@ async function runGraph(): Promise<GraphResult> {
     storage,
   }
 }
+
+installProcessDebugHandlers()
 
 const output = {
   control: runControl(),
